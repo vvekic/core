@@ -12,13 +12,13 @@ const cp = require('child_process');
 const app = express();
 const steamObj = {};
 const launch = new Date();
-const minUpTimeSeconds = config.PROVIDER === 'gce' ? 0 : 610;
+const minUpTimeSeconds = config.PROVIDER === 'gce' ? 0 : 630;
 const maxUpTimeSeconds = 3600;
-const matchRequestDelay = 100;
 const timeoutMs = 10000;
-const timeoutThreshold = 125;
-const accountsToUse = 15;
+const timeoutThreshold = 50;
+const accountsToUse = 2;
 const port = config.PORT || config.RETRIEVER_PORT;
+let matchRequestDelay = 300;
 let lastRequestTime;
 let matchRequests = 0;
 let matchSuccesses = 0;
@@ -94,12 +94,14 @@ function getGcMatchData(idx, matchId, cb) {
   const Dota2 = steamObj[idx].Dota2;
   matchRequests += 1;
   const shouldRestart = (matchRequests > 500 && getUptime() > minUpTimeSeconds)
-    || getUptime() > maxUpTimeSeconds;
+    || getUptime() > maxUpTimeSeconds
+    || (timeouts > timeoutThreshold && getUptime() > minUpTimeSeconds);
   if (shouldRestart && config.NODE_ENV !== 'development') {
     return selfDestruct();
   }
   const timeout = setTimeout(() => {
     timeouts += 1;
+    matchRequestDelay += 10;
   }, timeoutMs);
   return Dota2.requestMatchDetails(Number(matchId), (err, matchData) => {
     matchSuccesses += 1;
@@ -158,22 +160,27 @@ function init() {
       }, 5000);
     });
     */
+    /*
     setInterval(() => {
       // TODO remove this loop if steam fixes the one replay salt per connection issue
-      client.disconnect();
       client.connect();
-    }, 15000);
+    }, 10000);
+    */
   });
 }
 
-if (config.STEAM_ACCOUNT_DATA) {
-  const accountData = cp.execSync(`curl '${config.STEAM_ACCOUNT_DATA}'`).toString().split(/\r\n|\r|\n/g);
-  const startIndex = Math.floor((Math.random() * (accountData.length - accountsToUse)));
-  console.log('total registered accounts: %s, startIndex: %s', accountData.length, startIndex);
-  const accountDataToUse = accountData.slice(startIndex, startIndex + accountsToUse);
-  users = accountDataToUse.map(a => a.split('\t')[0]);
-  passes = accountDataToUse.map(a => a.split('\t')[1]);
+function chooseLoginInfo() {
+  if (config.STEAM_ACCOUNT_DATA) {
+    const accountData = cp.execSync(`curl '${config.STEAM_ACCOUNT_DATA}'`).toString().split(/\r\n|\r|\n/g);
+    const startIndex = Math.floor((Math.random() * (accountData.length - accountsToUse)));
+    console.log('total registered accounts: %s, startIndex: %s', accountData.length, startIndex);
+    const accountDataToUse = accountData.slice(startIndex, startIndex + accountsToUse);
+    users = accountDataToUse.map(a => a.split('\t')[0]);
+    passes = accountDataToUse.map(a => a.split('\t')[1]);
+  }
 }
+
+chooseLoginInfo();
 init();
 
 app.get('/healthz', (req, res) => {
@@ -188,19 +195,17 @@ app.use((req, res, cb) => {
 });
 app.get('/', (req, res, cb) => {
   const keys = Object.keys(steamObj);
-  if (!keys.length) {
-    return cb('No accounts ready');
-  }
-  const r = keys[Math.floor((Math.random() * keys.length))];
-  console.log('numReady: %s, matches: %s/%s, profiles: %s/%s, uptime: %s',
+  const rKey = keys[Math.floor((Math.random() * keys.length))];
+  console.log('numReady: %s, matches: %s/%s, profiles: %s/%s, uptime: %s, matchRequestDelay: %s',
     Object.keys(steamObj).length,
     matchSuccesses,
     matchRequests,
     profileSuccesses,
     profileRequests,
-    getUptime());
+    getUptime(),
+    matchRequestDelay);
   if (req.query.mmstats) {
-    return getMMStats(r, (err, data) => {
+    return getMMStats(rKey, (err, data) => {
       res.locals.data = data;
       return cb(err);
     });
@@ -212,20 +217,13 @@ app.get('/', (req, res, cb) => {
         error: 'too many requests',
       });
     }
-    if (timeouts > timeoutThreshold) {
-      // If we keep timing out, stop making requests
-      if (getUptime() > minUpTimeSeconds) {
-        return selfDestruct();
-      }
-      return cb('timeout count threshold exceeded');
-    }
     lastRequestTime = curRequestTime;
-    return getGcMatchData(r, req.query.match_id, (err, data) => {
+    return getGcMatchData(rKey, req.query.match_id, (err, data) => {
       res.locals.data = data;
       return cb(err);
     });
   } else if (req.query.account_id) {
-    return getPlayerProfile(r, req.query.account_id, (err, data) => {
+    return getPlayerProfile(rKey, req.query.account_id, (err, data) => {
       res.locals.data = data;
       return cb(err);
     });
